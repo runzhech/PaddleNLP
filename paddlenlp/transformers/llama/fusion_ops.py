@@ -51,6 +51,13 @@ try:
 except:
     flash_attention = None
 
+if get_env_device() == "xpu":
+    try:
+        from paddle_xpu.layers.nn import varlen_flash_attention
+    except ImportError:
+        print('[WARN] import paddle_xpu error!')
+        varlen_flash_attention = None
+
 from paddlenlp.transformers.ring_flash_attention import RingFlashAttention
 
 
@@ -203,6 +210,8 @@ def fusion_flash_attention(
                 attention_mask is None,
                 True,
             )[0]
+        elif get_env_device() == "xpu" and os.getenv('ENABLE_VARLEN_FA') is not None:
+            attn_output = varlen_flash_attention(query_states, key_states, value_states, attention_mask, attention_mask, None, None, 0, True, False)[0]
         else:
             if config.context_parallel_degree > 1:
                 attn_output = RingFlashAttention.apply(

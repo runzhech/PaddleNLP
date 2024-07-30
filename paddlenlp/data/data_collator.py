@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 import copy
 import random
 import warnings
@@ -433,6 +434,22 @@ class DataCollatorForSeq2Seq:
             return_tensors=return_tensors,
             return_attention_mask=self.return_attention_mask,
         )
+        if os.getenv('ENABLE_VARLEN_FA') is not None:
+            
+            for lod in batch['attention_mask']:
+                lod_len = int(lod[0])
+                if lod[lod_len - 1] != self.pad_to_multiple_of:
+                    if self.tokenizer.padding_side == "left":
+                        padding_offset = self.pad_to_multiple_of - lod[lod_len - 1]
+                        lod[lod_len] = self.pad_to_multiple_of
+                        for i in range(lod_len, 2, -1):
+                            lod[i] = lod[i-1] + padding_offset
+                        lod[2] = -padding_offset
+                        lod[0] += 1
+                else:
+                    lod[lod_len] = -self.pad_to_multiple_of
+                    lod[0] += 1
+                
         # prepare decoder_input_ids
         if (
             labels is not None

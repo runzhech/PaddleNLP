@@ -85,6 +85,8 @@ try:
     from paddle.nn.functional.flash_attention import flash_attention
 except:
     flash_attention = None
+    
+
 from . import fusion_ops
 
 rms_norm_fused = fusion_ops.rms_norm_fused
@@ -366,8 +368,9 @@ class LlamaRMSNorm(nn.Layer):
     def forward(self, hidden_states):
         if self.config.use_fused_rms_norm:
             return fusion_ops.fusion_rms_norm(
-                hidden_states, self.weight, self.variance_epsilon, self.config.use_fast_layer_norm
-            )
+                #hidden_states, self.weight, self.variance_epsilon, self.config.use_fast_layer_norm
+                hidden_states, self.weight, self.variance_epsilon, False    
+        )
 
         if paddle.in_dynamic_mode():
             with paddle.amp.auto_cast(False):
@@ -1377,7 +1380,7 @@ class LlamaPretrainedModel(PretrainedModel):
 @register_base_model
 class LlamaModel(LlamaPretrainedModel):
     """
-    Transformer decoder consisting of *config.num_hidden_layers* layers. Each layer is a [`LlamaDecoderLayer`]
+    Transformer decoder consisting of *1* layers. Each layer is a [`LlamaDecoderLayer`]
     Args:
         config: LlamaConfig
     """
@@ -1421,8 +1424,11 @@ class LlamaModel(LlamaPretrainedModel):
     @staticmethod
     def _prepare_decoder_attention_mask(attention_mask, input_shape, past_key_values_length, dtype):
         if attention_mask is not None:
+            if os.getenv('ENABLE_VARLEN_FA') is not None:
+                expanded_attn_mask = attention_mask
+
             # [bsz, seq_len] -> [bsz, 1, tgt_seq_len, src_seq_len]
-            if len(attention_mask.shape) == 2:
+            elif len(attention_mask.shape) == 2:
                 expanded_attn_mask = _expand_2d_mask(attention_mask, dtype, tgt_length=input_shape[-1])
                 # For decoding phase in generation, seq_length = 1, we don't need to add causal mask
                 if input_shape[-1] > 1:
@@ -1448,10 +1454,13 @@ class LlamaModel(LlamaPretrainedModel):
             expanded_attn_mask = expanded_attn_mask.astype("float32")
             expanded_attn_mask = paddle.where(expanded_attn_mask, x, y).astype(dtype)
         elif get_env_device() in ["xpu", "gcu"]:
-            x = paddle.to_tensor(0.0, dtype=dtype)
-            y = paddle.to_tensor(paddle.finfo(dtype).min, dtype=dtype)
-            expanded_attn_mask = expanded_attn_mask.astype(dtype)
-            expanded_attn_mask = paddle.where(expanded_attn_mask, x, y).astype(dtype)
+            if os.getenv('ENABLE_VARLEN_FA') is not None:
+                expanded_attn_mask = expanded_attn_mask.astype("int32")
+            else:
+                x = paddle.to_tensor(0.0, dtype=dtype)
+                y = paddle.to_tensor(paddle.finfo(dtype).min, dtype=dtype)
+                expanded_attn_mask = expanded_attn_mask.astype(dtype)
+                expanded_attn_mask = paddle.where(expanded_attn_mask, x, y).astype(dtype)
         else:
             expanded_attn_mask = paddle.where(expanded_attn_mask, 0.0, paddle.finfo(dtype).min).astype(dtype)
         return expanded_attn_mask
@@ -1586,7 +1595,6 @@ class LlamaModel(LlamaPretrainedModel):
             attention_mask = self._prepare_decoder_attention_mask(
                 attention_mask, (batch_size, seq_length), cache_length, inputs_embeds.dtype
             )  # [bs, 1, seq_len, seq_len]
-
         is_casual = False
 
         if attn_mask_startend_row_indices is None and self.config.use_flash_attention and get_env_device() != "gcu":
